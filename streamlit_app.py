@@ -12,7 +12,7 @@ from gtts import gTTS
 API_KEY = (
     st.secrets.get("GOOGLE_API_KEY", "")
     if hasattr(st, "secrets") else ""
-) or os.getenv("GOOGLE_API_KEY", "") or ""  # <- 마지막에 직접 문자열로 넣어도 됨
+) or os.getenv("GOOGLE_API_KEY", "") or "AIzaSyDvTKaKoZs9_UjG0aY8bd4pjmJaGKJKB6g"  # <- 마지막에 직접 문자열로 넣어도 됨
 
 # ---- LLM(옵션) 초기화 ----
 USE_LLM = False
