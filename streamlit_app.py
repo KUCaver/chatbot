@@ -1,12 +1,11 @@
-# streamlit_app.py — '폰' 단일화면 + 아바타 + 금융기능 업그레이드 (PoC)
+# streamlit_app.py — '폰' 단일화면 + 아바타 + LLM 인텐트 + 결제직전최적화 + 핸드오프 + 교육 + 게이미피케이션 (PoC)
 # 설치: pip install -U streamlit google-generativeai pillow pandas gTTS
 import os, io, json, time, base64, math, random, datetime
 import streamlit as st
 import pandas as pd
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 from gtts import gTTS
 
-# ------------------ 기본 세팅 (창=폰) ------------------
 PHONE_W = 430
 st.set_page_config(page_title="아바타 금융 코치", page_icon="📱", layout="centered")
 
@@ -18,7 +17,6 @@ html, body {{ background:#0b0d12; }}
   max-width:{PHONE_W}px; padding-top:10px; padding-bottom:12px;
   border:12px solid #101012; border-radius:30px; background:#0f1116;
   box-shadow:0 16px 40px rgba(0,0,0,.4);
-  position:relative;
 }}
 /* 공통 */
 .hint {{ color:#8a96ac; font-size:.82rem; }}
@@ -58,24 +56,19 @@ html, body {{ background:#0b0d12; }}
 .input {{ flex:1; height:40px; border-radius:20px; border:1px solid #2a2f3a; background:#0f1420; color:#e9eefc; padding:0 12px; }}
 .send {{ height:40px; padding:0 16px; border:none; border-radius:12px; background:#2b6cff; color:#fff; }}
 
-/* 메트릭 */
-.metric {{ color:#e9eefc; }}
-
-/* 아바타(상시 표시, 우상단 고정) */
-#avatarWrap {{
-  position: sticky; top:8px; z-index:9;
-}}
+/* 아바타: 히어로 내부에 고정 */
 .avatar {{
-  position:absolute; right:22px; top:22px; width:74px; height:74px; border-radius:50%;
+  position:absolute; right:14px; top:14px; width:72px; height:72px; border-radius:50%;
   border:2px solid #2a3552; overflow:hidden; box-shadow:0 8px 24px rgba(0,0,0,.35);
 }}
 .avatar img {{ width:100%; height:100%; object-fit:cover; }}
 .avatarTag {{
-  position:absolute; right:18px; top:102px; background:#1b2340; color:#dfe8ff; font-size:.75rem;
+  position:absolute; right:12px; top:96px; background:#1b2340; color:#dfe8ff; font-size:.75rem;
   border:1px solid #2b3558; padding:.2rem .5rem; border-radius:999px; box-shadow:0 2px 8px rgba(0,0,0,.2);
 }}
 
 .smallnote {{ font-size:.78rem; color:#98a3bb; }}
+.badge {{ display:inline-block; padding:.22rem .5rem; border:1px solid #2a3558; border-radius:999px; margin-right:4px; font-size:.75rem; color:#dfe8ff; background:#141c33;}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -85,9 +78,24 @@ with st.sidebar:
     key_from_sidebar = st.text_input("Gemini API Key (선택)", type="password")
     API_KEY = st.secrets.get("GOOGLE_API_KEY","") or os.getenv("GOOGLE_API_KEY","") or key_from_sidebar
     st.caption("키가 없으면 규칙 기반으로만 동작합니다.")
-    hero = st.file_uploader("히어로(배경) 이미지", type=["png","jpg","jpeg"])
-    avatar_file = st.file_uploader("아바타 이미지(선택)", type=["png","jpg","jpeg"])
+    hero_up = st.file_uploader("히어로(배경) 이미지", type=["png","jpg","jpeg"])
+    avatar_up = st.file_uploader("아바타 이미지(선택)", type=["png","jpg","jpeg"])
     tts_on = st.toggle("봇 답변 음성(TTS) 재생", value=False)
+    geo_sim = st.toggle("지오펜싱 결제추천(시뮬레이션)", value=False)
+
+# ------------------ 안전한 업로드 → base64 ------------------
+def upload_to_b64(file):
+    if not file: return ""
+    try:
+        data = file.getvalue()
+    except Exception:
+        data = file.read()
+        try: file.seek(0)
+        except Exception: pass
+    return base64.b64encode(data).decode()
+
+hero_b64 = upload_to_b64(hero_up)
+avatar_b64 = upload_to_b64(avatar_up)
 
 # ------------------ LLM ------------------
 USE_LLM, MODEL = False, None
@@ -104,8 +112,7 @@ if API_KEY:
 def age_from_dob(dob):
     y,m,d = map(int, dob.split("-"))
     today = datetime.date.today()
-    a = today.year - y - ((today.month, today.day) < (m, d))
-    return a
+    return today.year - y - ((today.month, today.day) < (m, d))
 
 CUSTOMER = {
     "profile": {
@@ -163,7 +170,6 @@ def card_png_b64(title, color="#5B8DEF"):
     return base64.b64encode(buf.getvalue()).decode()
 
 def estimate_saving(amount:int, mcc:str):
-    """카드별 절약액 계산 + 최적 1개와 Top3"""
     best=("현재카드 유지",0,"추가 혜택 없음"); board=[]
     for c in CUSTOMER["owned_cards"]:
         if "ALL" not in c["mcc"] and mcc not in c["mcc"]:
@@ -201,93 +207,135 @@ def low_balance():
     acc = next(a for a in CUSTOMER["accounts"] if a["type"]=="입출금")
     return acc["balance"] < acc.get("low_alert", 0)
 
+# ------------------ LLM 유틸 ------------------
 def llm_reply(user_msg:str)->str:
-    """고객 데이터(JSON)를 문맥으로 주입하여 LLM이 '맞춤' 응답"""
-    context = {
-        "customer": CUSTOMER,
-        "latest_transactions": TX_LOG.tail(20).to_dict(orient="records")
-    }
+    context = {"customer": CUSTOMER, "latest_transactions": TX_LOG.tail(20).to_dict("records")}
     sys = (
-        "너는 금융 코치이자 친절한 비서 '아바타'야. 아래 JSON의 고객 데이터를 '사실의 근거'로 삼아 "
-        "한국어로 간단·정확하게 답해줘. 고객의 개인정보는 그대로 복창하지 말고 필요한 범위만 요약해. "
-        "가능하면 다음 액션 버튼이나 실행 제안을 포함해.\n"
-        "- 결제 직전 최적화: 가맹점(MCC)에 맞춰 절약 최대 카드를 안내.\n"
-        "- 예산 요약/초과 경고, 다음 납부일, 신용카드 이용률, 목표 납입 제안 등을 포함.\n"
-        "- 답변은 3~6문장으로 간결히."
+        "너는 금융 코치이자 아바타. 아래 JSON을 사실 근거로 한국어로 간결하게 답해. "
+        "개인정보는 그대로 복창하지 말고 필요한 범위만 요약. 3~6문장, 실행 제안 포함."
     )
-    prompt = f"{sys}\n\n# CUSTOMER_DATA\n{json.dumps(context, ensure_ascii=False, indent=2)}\n\n# USER\n{user_msg}\n# ASSISTANT"
+    prompt = f"{sys}\n\n# CUSTOMER_DATA\n{json.dumps(context, ensure_ascii=False)}\n\n# USER\n{user_msg}\n# ASSISTANT"
     if not USE_LLM:
-        # 폴백: 규칙 기반 요약
         low = user_msg.lower()
         if any(k in low for k in ["한도","카드","결제","사용"]):
             a = next(x for x in CUSTOMER["accounts"] if x["type"]=="신용카드")
             util = credit_utilization()*100
-            return f"카드 사용 {money(a['used'])} / 한도 {money(a['limit'])}(이용률 {util:.1f}%). 다음 납부일은 {a['statement_due']}."
+            return f"카드 사용 {money(a['used'])} / 한도 {money(a['limit'])}(이용률 {util:.1f}%). 다음 납부일 {a['statement_due']}."
         if "예산" in user_msg:
             over = budget_status()
             if over:
                 txt = " · ".join([f"{k} {money(s)} / {money(l)}" for k,s,l in over])
-                return f"예산 경고: {txt}. 필요 시 한도 상향 또는 지출 조정 제안할게요."
-            return "예산은 아직 여유가 있어요. 필요한 항목의 한도를 올리거나 목표 적립을 늘릴 수도 있어요."
-        return "무엇을 도와드릴까요? 예) “스타커피 12800원 결제 추천”, “이번달 예산 요약”, “여행자금 목표 200만원 8개월”."
+                return f"예산 경고: {txt}. 필요 시 한도 조정/절약 플랜을 제안할게요."
+            return "예산은 아직 여유가 있어요."
+        return "무엇을 도와드릴까요? 예) “스타커피 12800원 결제 추천”, “이번달 예산 요약”."
     try:
         res = MODEL.generate_content(prompt)
         return (getattr(res,"text","") or "").strip()
     except Exception as e:
         return f"[LLM 오류: {e}]"
 
+def llm_intent(user_msg:str):
+    if not USE_LLM:
+        return {"tab":"home","actions":[],"arguments":{}}
+    try:
+        sys = ("아래 고객 JSON을 참고해 사용자 의도를 JSON으로만 요약. "
+               "필드: tab(home|pay|goal|calendar|insight), "
+               "actions:[{{label, command, params}}], arguments:{{}}")
+        payload = {"customer": CUSTOMER, "latest_transactions": TX_LOG.tail(20).to_dict("records")}
+        prompt = f"{sys}\n\n# DATA\n{json.dumps(payload, ensure_ascii=False)}\n# USER\n{user_msg}\n# JSON ONLY"
+        res = MODEL.generate_content(prompt, generation_config={"response_mime_type":"application/json"})
+        return json.loads(res.text)
+    except Exception:
+        return {"tab":"home","actions":[],"arguments":{}}
+
+def llm_daily_brief():
+    if not USE_LLM:
+        return "요약: 이용률/예산/납부일 확인. 액션: 납부일 확인, 결제 최적화, 목표 점검."
+    payload = {"customer": CUSTOMER, "latest_transactions": TX_LOG.tail(20).to_dict("records")}
+    sys = "너는 금융 코치. 데이터를 근거로 한 문단 요약과 다음 행동 3가지를 제시."
+    prompt = f"{sys}\n\n# DATA\n{json.dumps(payload, ensure_ascii=False)}\n# OUTPUT: 한국어, 4~6문장 + 불릿 3개"
+    try:
+        res = MODEL.generate_content(prompt)
+        return res.text.strip()
+    except Exception as e:
+        return f"[요약 오류: {e}]"
+
+def llm_parse_payment(free_text:str):
+    if not USE_LLM or not free_text.strip():
+        return None
+    schema = ("JSON으로만. 필드: merchant(string), amount(int,원). "
+              "merchant는 CUSTOMER.merchants 키 중 가장 유사한 값으로 매핑.")
+    payload = {"merchants": list(CUSTOMER["merchants"].keys())}
+    prompt = f"{schema}\n예:'스타커피 1.28만','버거팰리스 점심 12,000','🎬메가시네마 14000'\n\n{json.dumps(payload, ensure_ascii=False)}\nUSER:{free_text}\nJSON:"
+    try:
+        res = MODEL.generate_content(prompt, generation_config={"response_mime_type":"application/json"})
+        return json.loads(res.text)
+    except Exception:
+        return None
+
+def llm_explain(user_msg:str):
+    if not USE_LLM: return None
+    evidence = {"accounts": CUSTOMER["accounts"], "schedule": CUSTOMER["schedule"]}
+    sys = ("아래 데이터만 근거로 '왜/어떻게' 질문을 설명. 불확실하면 가정(가능성)으로 구분. 3~6문장, 실행 제안 1개.")
+    prompt = f"{sys}\n# DATA\n{json.dumps(evidence, ensure_ascii=False)}\n# QUESTION\n{user_msg}\n# ANSWER:"
+    try:
+        res = MODEL.generate_content(prompt); return res.text.strip()
+    except: return None
+
+def llm_glossary(query:str):
+    """금융 용어/약관 요약 모듈"""
+    if not USE_LLM: return None
+    sys = ("금융 초심자 눈높이로 쉬운 비유와 수치 예시 포함해 5줄 이내 요약. 필요시 주의점 1개.")
+    prompt = f"{sys}\n용어/문구: {query}\n한국어로:"
+    try:
+        res = MODEL.generate_content(prompt); return res.text.strip()
+    except: return None
+
 def tts_play(text:str):
     try:
         tts = gTTS(text=text, lang='ko')
-        buf = io.BytesIO()
-        tts.write_to_fp(buf)
+        buf = io.BytesIO(); tts.write_to_fp(buf)
         st.audio(buf.getvalue(), format="audio/mp3")
     except Exception as e:
         st.warning(f"TTS 생성 실패: {e}")
 
 # ------------------ 상태 ------------------
-if "tab" not in st.session_state: st.session_state.tab="home"
-if "msgs" not in st.session_state:
-    st.session_state.msgs=[("bot","어서 오세요. 어떤 금융 고민을 도와드릴까요?")]
-if "last_bot" not in st.session_state: st.session_state.last_bot = st.session_state.msgs[-1][1]
+ss = st.session_state
+if "tab" not in ss: ss.tab="home"
+if "msgs" not in ss: ss.msgs=[("bot","어서 오세요. 어떤 금융 고민을 도와드릴까요?")]
+if "last_bot" not in ss: ss.last_bot = ss.msgs[-1][1]
+if "badges" not in ss: ss.badges=set()           # 게이미피케이션
+if "crm_queue" not in ss: ss.crm_queue=[]        # 상담사 핸드오프 큐(요약/근거)
+if "audit" not in ss: ss.audit=[]                # 감사 로그(요약/권유 근거)
 
-# ------------------ 아바타(항상 표시) ------------------
-st.markdown('<div id="avatarWrap"></div>', unsafe_allow_html=True)
-with st.container():
-    st.markdown('<div class="avatar">', unsafe_allow_html=True)
-    if avatar_file:
-        b64 = base64.b64encode(avatar_file.read()).decode()
-        st.markdown(f'<img src="data:image/png;base64,{b64}">', unsafe_allow_html=True)
-    else:
-        # 텍스트 아바타(이니셜) 생성
-        av = Image.new("RGB",(200,200),(21,27,46)); d=ImageDraw.Draw(av)
-        d.ellipse((4,4,196,196), fill=(33,41,72))
-        # 텍스트
-        initials = "AVA"
-        try:
-            d.text((70,86), initials, fill=(220,230,255))
-        except:
-            pass
-        buf=io.BytesIO(); av.save(buf,format="PNG")
-        st.markdown(f'<img src="data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}">', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-    st.markdown('<div class="avatarTag">아바타 코치</div>', unsafe_allow_html=True)
-
-# ------------------ 히어로 ------------------
+# ------------------ 히어로 + 아바타 ------------------
 st.markdown("### ")
 with st.container():
     st.markdown('<div class="hero">', unsafe_allow_html=True)
-    if hero:
-        b64 = base64.b64encode(hero.read()).decode()
-        st.markdown(f'<img src="data:image/png;base64,{b64}">', unsafe_allow_html=True)
+    if hero_b64:
+        st.markdown(f'<img src="data:image/png;base64,{hero_b64}">', unsafe_allow_html=True)
     else:
-        st.markdown('<img src="data:image/png;base64,">', unsafe_allow_html=True)
         st.markdown("""
         <div style="position:absolute;inset:0;
              background:linear-gradient(135deg,#1b2140 0%,#0f182b 55%,#0a0f1a 100%);"></div>
         """, unsafe_allow_html=True)
     st.markdown('<div class="scrim"></div>', unsafe_allow_html=True)
 
+    # 아바타(히어로 내부 고정)
+    st.markdown('<div class="avatar">', unsafe_allow_html=True)
+    if avatar_b64:
+        st.markdown(f'<img src="data:image/png;base64,{avatar_b64}">', unsafe_allow_html=True)
+    else:
+        # 텍스트 아바타 생성
+        av = Image.new("RGB",(200,200),(21,27,46)); d=ImageDraw.Draw(av)
+        d.ellipse((4,4,196,196), fill=(33,41,72))
+        d.text((80,86), "AVA", fill=(220,230,255))
+        buf=io.BytesIO(); av.save(buf,format="PNG")
+        st.markdown(f'<img src="data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}">', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('<div class="avatarTag">아바타 코치</div>', unsafe_allow_html=True)
+
+    # 칩/버블
     prof = CUSTOMER["profile"]
     chips = [
         f"{prof['name']} · {prof['tier']}",
@@ -296,50 +344,59 @@ with st.container():
         f"목표 {CUSTOMER['goal']['name']} {CUSTOMER['goal']['progress']}%"
     ]
     st.markdown('<div class="hero-content">', unsafe_allow_html=True)
-    for c in chips:
-        st.markdown(f'<span class="chip">{c}</span>', unsafe_allow_html=True)
+    for c in chips: st.markdown(f'<span class="chip">{c}</span>', unsafe_allow_html=True)
     st.markdown('<div class="bubble">어서 오세요. 어떤 금융 고민을 도와드릴까요?</div>', unsafe_allow_html=True)
     st.markdown('</div></div>', unsafe_allow_html=True)
 
-# ------------------ 네비 (아이콘+라벨) ------------------
+# ------------------ 네비 ------------------
 c1,c2,c3,c4 = st.columns(4)
-if c1.button("🏠 홈"): st.session_state.tab="home"
-if c2.button("💳 결제"): st.session_state.tab="pay"
-if c3.button("🎯 목표"): st.session_state.tab="goal"
-if c4.button("📅 일정"): st.session_state.tab="calendar"
+if c1.button("🏠 홈"): ss.tab="home"
+if c2.button("💳 결제"): ss.tab="pay"
+if c3.button("🎯 목표"): ss.tab="goal"
+if c4.button("📅 일정"): ss.tab="calendar"
 st.markdown(
     f'<div class="navrow">'
-    f'<div class="navbtn {"active" if st.session_state.tab=="home" else ""}">🏠 홈</div>'
-    f'<div class="navbtn {"active" if st.session_state.tab=="pay" else ""}">💳 결제</div>'
-    f'<div class="navbtn {"active" if st.session_state.tab=="goal" else ""}">🎯 목표</div>'
-    f'<div class="navbtn {"active" if st.session_state.tab=="calendar" else ""}">📅 일정</div>'
+    f'<div class="navbtn {"active" if ss.tab=="home" else ""}">🏠 홈</div>'
+    f'<div class="navbtn {"active" if ss.tab=="pay" else ""}">💳 결제</div>'
+    f'<div class="navbtn {"active" if ss.tab=="goal" else ""}">🎯 목표</div>'
+    f'<div class="navbtn {"active" if ss.tab=="calendar" else ""}">📅 일정</div>'
     f'</div>', unsafe_allow_html=True
 )
 
-# ------------------ 상단 즉시 알림(푸시 느낌) ------------------
+# ------------------ 즉시 알림 ------------------
 acc_dep = next(a for a in CUSTOMER["accounts"] if a["type"]=="입출금")
 card_acc = next(a for a in CUSTOMER["accounts"] if a["type"]=="신용카드")
 _util = credit_utilization()
 _alerts = []
 
-if low_balance():
-    _alerts.append(f"입출금 잔액이 낮아요({money(acc_dep['balance'])}). 예정 이체를 확인하세요.")
-if _util >= 0.8:
-    _alerts.append(f"신용카드 이용률이 높습니다({_util*100:.0f}%). 한시적 결제금 유보·분할 고려.")
-_due_soon = due_within(10)
-if _due_soon:
-    titles = " · ".join([f"{x['title']}({x['date']})" for x in _due_soon])
+if low_balance(): _alerts.append(f"입출금 잔액이 낮아요({money(acc_dep['balance'])}). 예정 이체 확인.")
+if _util >= 0.8: _alerts.append(f"신용카드 이용률 높음({_util*100:.0f}%). 분할/유예 검토.")
+_due = due_within(10)
+if _due:
+    titles = " · ".join([f"{x['title']}({x['date']})" for x in _due])
     _alerts.append(f"다가오는 일정: {titles}")
+if geo_sim:
+    _alerts.append("근처 '스타커피' 감지 → CAFE 가맹점 최적 카드 추천 활성.")
 
-for a in _alerts:
-    st.toast(a, icon="⚠️")
+for a in _alerts: st.toast(a, icon="⚠️")
 
-# ------------------ 본문 (탭 컨텐츠) ------------------
-tab = st.session_state.tab
+# ------------------ 본문 ------------------
+tab = ss.tab
 
-# 홈: 대화 + 요약 카드 + 지표
 if tab=="home":
-    # 금융 건강 점수(간단 규칙)
+    # 오늘의 요약
+    with st.expander("📌 오늘의 요약", expanded=True):
+        st.write(llm_daily_brief())
+
+    # 대화
+    st.markdown('<div class="section">', unsafe_allow_html=True)
+    st.markdown('<div class="label">대화</div>', unsafe_allow_html=True)
+    for role, text in ss.msgs:
+        cls = "user" if role=="user" else ""
+        st.markdown(f'<div class="msgbox"><div class="msg {cls}"><div class="balloon">{text}</div></div></div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # 스냅샷
     score = 100
     score -= int(max(0, (_util-0.3)*100))//2
     if low_balance(): score -= 10
@@ -349,14 +406,6 @@ if tab=="home":
         elif ratio>0.9: score -= 4
     score = max(0, min(100, score))
 
-    st.markdown('<div class="section">', unsafe_allow_html=True)
-    st.markdown('<div class="label">대화</div>', unsafe_allow_html=True)
-    for role, text in st.session_state.msgs:
-        cls = "user" if role=="user" else ""
-        st.markdown(f'<div class="msgbox"><div class="msg {cls}"><div class="balloon">{text}</div></div></div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # 금융 스냅샷
     st.markdown('<div class="section" style="margin-top:10px;">', unsafe_allow_html=True)
     st.markdown('<div class="label">금융 스냅샷</div>', unsafe_allow_html=True)
     col1,col2,col3 = st.columns(3)
@@ -371,28 +420,28 @@ if tab=="home":
     st.dataframe(TX_LOG, height=220, use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# 결제: 자동 라우팅 + 추천 Top3 + '결제 직전 최적화(PoC)'
 elif tab=="pay":
     st.markdown('<div class="section">', unsafe_allow_html=True)
     st.markdown('<div class="label">결제 입력</div>', unsafe_allow_html=True)
 
-    # 자유 텍스트 파서(간단): "스타커피 12800"
-    raw = st.text_input("자유 입력(예: 스타커피 12800)", value="")
+    # 자연어 → LLM 파싱(보정)
+    raw = st.text_input("자유 입력(예: 스타커피 12800 / 점심 1.2만)", value="")
     merchant = None; amount = None
     if raw.strip():
         parts = raw.split()
         for p in parts:
-            if p.isdigit(): amount = int(p)
-        # 상호명 후보 매칭
-        names = list(CUSTOMER["merchants"].keys())
-        for nm in names:
-            if nm.replace(" ","") in raw.replace(" ",""):
-                merchant = nm; break
+            if p.replace(",","").isdigit(): amount = int(p.replace(",",""))
+        for nm in CUSTOMER["merchants"].keys():
+            if nm.replace(" ","") in raw.replace(" ",""): merchant = nm; break
+        fix = llm_parse_payment(raw)
+        if fix:
+            merchant = fix.get("merchant", merchant)
+            amount   = fix.get("amount", amount)
 
-    merchant = st.selectbox("가맹점", list(CUSTOMER["merchants"].keys()), index=(list(CUSTOMER["merchants"].keys()).index(merchant) if merchant in CUSTOMER["merchants"] else 0))
+    merchant = st.selectbox("가맹점", list(CUSTOMER["merchants"].keys()),
+                            index=(list(CUSTOMER["merchants"].keys()).index(merchant) if merchant in CUSTOMER["merchants"] else 0))
     amount = st.number_input("금액(원)", min_value=1000, value=int(amount) if amount else 12800, step=500)
     auto   = st.toggle("자동결제 라우팅(최적 카드 자동선택)", value=True)
-
     mcc = CUSTOMER["merchants"][merchant]
     best, top3 = estimate_saving(int(amount), mcc)
 
@@ -410,28 +459,22 @@ elif tab=="pay":
             )
     st.info(f"결제 직전 최적화 결과 → **{best[0]}** · 예상 절약 {money(best[1])}")
 
-    # PoC: 결제 실행 + 누적 적립/잔액 변화
     if st.button("✅ 결제 실행(모의)", use_container_width=True):
         applied = best[0] if auto else top3[0][0]
-        TX_LOG.loc[len(TX_LOG)] = {
-            "date": time.strftime("%Y-%m-%d"),
-            "merchant": merchant, "mcc": mcc, "amount": int(amount)
-        }
-        # 입출금 차감(간단 PoC)
+        TX_LOG.loc[len(TX_LOG)] = {"date": time.strftime("%Y-%m-%d"), "merchant": merchant, "mcc": mcc, "amount": int(amount)}
         dep = next(a for a in CUSTOMER["accounts"] if a["type"]=="입출금")
         dep["balance"] = max(0, dep["balance"] - int(amount))
-
-        # 누적 적립 업데이트(적립 실적 증가)
         for c in CUSTOMER["owned_cards"]:
             if c["name"]==applied:
                 c["month_accum"] = min(c["cap"], c["month_accum"] + best[1])
-
-        st.session_state.msgs.append(("bot", f"{merchant} {money(amount)} 결제 완료! 적용 {applied} · 절약 {money(best[1])}"))
+        ss.msgs.append(("bot", f"{merchant} {money(amount)} 결제 완료! 적용 {applied} · 절약 {money(best[1])}"))
+        ss.audit.append({"ts": time.time(), "type":"payment", "merchant":merchant, "amount":int(amount), "applied":applied, "saving":best[1]})
+        # 게이미피케이션: 예산 준수/절약 배지
+        if amount <= 10000: ss.badges.add("소액절약")
         st.success("결제가 완료되었습니다!")
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
-# 목표: 목표 금액/기간, 월 납입 추천, what-if 시뮬
 elif tab=="goal":
     g = CUSTOMER["goal"]
     st.markdown('<div class="section">', unsafe_allow_html=True)
@@ -445,89 +488,114 @@ elif tab=="goal":
     monthly = math.ceil(target/max(months,1)/1000)*1000
     if st.button("목표 저장/갱신", use_container_width=True):
         CUSTOMER["goal"].update({"name":goal,"target":int(target),"months":int(months),"monthly":int(monthly)})
-        st.session_state.msgs.append(("bot", f"'{goal}' 플랜 저장! 권장 월 납입 {money(monthly)}"))
+        ss.msgs.append(("bot", f"'{goal}' 플랜 저장! 권장 월 납입 {money(monthly)}"))
+        ss.audit.append({"ts":time.time(), "type":"goal_update", "goal":goal, "monthly":int(monthly)})
         st.rerun()
 
     st.progress(min(g["progress"],100)/100, text=f"진행률 {g['progress']}%")
     st.write(f"권장 월 납입: **{money(CUSTOMER['goal']['monthly'])}**")
 
-    # what-if: 월 납입 변경 → 달성 기간 추정
+    # what-if
     st.markdown('<div class="label" style="margin-top:6px;">What-if 시뮬레이션</div>', unsafe_allow_html=True)
     cur = CUSTOMER["goal"]["monthly"]
     new_monthly = st.slider("월 납입(가정)", min_value=50_000, max_value=1_000_000, value=int(cur), step=50_000)
-    remain = max(0, CUSTOMER["goal"]["target"] - int(CUSTOMER["accounts"][2]["balance"]))  # 적금 잔액 가정 사용
+    remain = max(0, CUSTOMER["goal"]["target"] - int(CUSTOMER["accounts"][2]["balance"]))
     months_needed = math.ceil(remain / max(new_monthly,1))
     st.info(f"월 {money(new_monthly)} 납입 시 예상 달성 기간: 약 **{months_needed}개월**")
+    if new_monthly >= cur * 1.2: ss.badges.add("저축가속")
 
     rows=[{"월":i+1,"권장 납입":CUSTOMER["goal"]["monthly"],"누적":CUSTOMER["goal"]["monthly"]*(i+1)} for i in range(CUSTOMER["goal"]["months"])]
     st.dataframe(pd.DataFrame(rows), height=220, use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# 일정: 납부·이체·체크
-else:
+else:  # calendar
     st.markdown('<div class="section">', unsafe_allow_html=True)
     st.markdown('<div class="label">다가오는 일정</div>', unsafe_allow_html=True)
     sched = pd.DataFrame(CUSTOMER["schedule"])
     st.table(sched)
 
-    # 납부 리마인더(간단 결제모의)
     st.markdown('<div class="label" style="margin-top:8px;">빠른 액션</div>', unsafe_allow_html=True)
     if st.button("💳 이번 달 카드 최소금 납부(모의)", use_container_width=True):
         dep = next(a for a in CUSTOMER["accounts"] if a["type"]=="입출금")
         card = next(a for a in CUSTOMER["accounts"] if a["type"]=="신용카드")
         dep["balance"] = max(0, dep["balance"] - card["min_due"])
         card["used"] = max(0, card["used"] - card["min_due"])
-        st.session_state.msgs.append(("bot", f"최소금 {money(card['min_due'])} 납부 처리(모의). 입출금 {money(dep['balance'])}"))
+        ss.msgs.append(("bot", f"최소금 {money(card['min_due'])} 납부 처리(모의). 입출금 {money(dep['balance'])}"))
+        ss.audit.append({"ts":time.time(), "type":"min_due_paid", "amount":card["min_due"]})
         st.success("납부(모의) 완료!")
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ------------------ 입력(대화) ------------------
 with st.form("msg_form", clear_on_submit=True):
-    c1,c2 = st.columns([6,1])
+    c1,c2,c3 = st.columns([5,1,1])
     with c1:
         user_msg = st.text_input("메시지", label_visibility="collapsed",
-                                 placeholder="예) 이번달 외식 예산 요약 / 스타커피 12800원 결제 추천 / 목표 200만원 8개월")
+            placeholder="예) 금리 차이 왜 그래? / 스타커피 12800 결제 / 연금저축 설명 / 상담사 연결")
     with c2:
         sent = st.form_submit_button("보내기", use_container_width=True)
+    with c3:
+        edu = st.form_submit_button("📘용어", use_container_width=True)
 
 if sent and user_msg.strip():
     text = user_msg.strip()
-    st.session_state.msgs.append(("user", text))
-    # 간단 라우팅 키워드
-    low = text.lower()
-    if any(k in low for k in ["결제","카드","스타커피","버거","시네마","김밥","편의점"]): st.session_state.tab="pay"
-    elif any(k in low for k in ["목표","포트폴리오","플랜"]): st.session_state.tab="goal"
-    elif any(k in low for k in ["일정","캘린더","납부"]): st.session_state.tab="calendar"
-    # LLM(선택) — 고객 데이터 주입
+    ss.msgs.append(("user", text))
+    # 인텐트 → 탭/액션 힌트
+    hint = llm_intent(text)
+    if hint.get("tab") in {"home","pay","goal","calendar","insight"}:
+        ss.tab = "home" if hint["tab"]=="insight" else hint["tab"]
+    # 설명형 질문 자동 보조
+    if any(k in text for k in ["왜","이유","차이","달라졌","어떻게"]):
+        ex = llm_explain(text)
+        if ex: ss.msgs.append(("bot", ex))
+    # 상담사 핸드오프 큐(PoC)
+    if any(k in text for k in ["상담","핸드오프","콜백","지점"]):
+        summary = llm_reply("요약:"+text) if USE_LLM else text[:120]
+        ss.crm_queue.append({"ts":time.time(),"topic":text,"summary":summary,"status":"대기"})
+        st.toast("상담사 연결 요청을 접수했어요(모의).", icon="☎️")
+    # 일반 답변
     reply = llm_reply(text)
-    st.session_state.msgs.append(("bot", reply))
-    st.session_state.last_bot = reply
+    ss.msgs.append(("bot", reply))
+    ss.last_bot = reply
     st.rerun()
 
-# ------------------ 하단 힌트/컨트롤 ------------------
+if edu:
+    term = st.session_state.get("last_user_term","연금저축")
+    gloss = llm_glossary(term) or "용어 설명을 불러올 수 없습니다."
+    ss.msgs.append(("bot", f"[용어설명] {gloss}"))
+    ss.last_bot = gloss
+    st.rerun()
+
+# ------------------ 하단 PoC 컨트롤/배지/큐 ------------------
 st.markdown('<div class="section" style="margin-top:8px;">', unsafe_allow_html=True)
 st.markdown('<div class="label">PoC 컨트롤</div>', unsafe_allow_html=True)
 colA,colB,colC = st.columns(3)
-if colA.button("⬇️ 잔액 -50,000(모의)"):
+if colA.button("⬇️ 잔액 -50,000"):
     dep = next(a for a in CUSTOMER["accounts"] if a["type"]=="입출금")
-    dep["balance"] = max(0, dep["balance"] - 50_000)
-    st.toast("입출금 잔액 변경(PoC).", icon="🔄"); st.rerun()
-if colB.button("⬆️ 카드사용 +100,000(모의)"):
+    dep["balance"] = max(0, dep["balance"] - 50_000); st.toast("입출금 잔액 변경.", icon="🔄"); st.rerun()
+if colB.button("⬆️ 카드사용 +100,000"):
     card = next(a for a in CUSTOMER["accounts"] if a["type"]=="신용카드")
-    card["used"] += 100_000
-    st.toast("카드 사용액 증가(PoC).", icon="🔄"); st.rerun()
-if colC.button("🔔 오늘 일정 추가(PoC)"):
+    card["used"] += 100_000; st.toast("카드 사용액 증가.", icon="🔄"); st.rerun()
+if colC.button("🔔 오늘 일정 추가"):
     today = datetime.date.today().isoformat()
     CUSTOMER["schedule"].append({"date":today,"title":"테스트 알림","amount":0})
     st.toast("오늘 일정 추가됨.", icon="📅"); st.rerun()
-st.markdown('<div class="smallnote">※ 데이터는 세션 내 임시 상태로 동작합니다.</div>', unsafe_allow_html=True)
-st.markdown('</div>', unsafe_allow_html=True)
 
-# 마지막 봇 답변 TTS(옵션)
-if tts_on and st.session_state.last_bot:
-    tts_play(st.session_state.last_bot)
+# 배지 표시
+if ss.badges:
+    st.markdown('<div class="section" style="margin-top:8px;">', unsafe_allow_html=True)
+    st.markdown('<div class="label">획득 배지</div>', unsafe_allow_html=True)
+    st.markdown(" ".join([f"<span class='badge'>{b}</span>" for b in sorted(ss.badges)]), unsafe_allow_html=True)
 
-# 하단 힌트
-st.markdown('<div class="hint">※ 이 데모는 고객 데이터(샘플)를 컨텍스트로 사용해 맞춤 응답/추천을 생성합니다. '
-            'Gemini 키가 없으면 규칙 기반으로만 동작합니다. 실제 결제 연동은 포함되어 있지 않습니다.</div>', unsafe_allow_html=True)
+# 상담 큐 표시
+if ss.crm_queue:
+    st.markdown('<div class="section" style="margin-top:8px;">', unsafe_allow_html=True)
+    st.markdown('<div class="label">상담사 핸드오프 큐(모의)</div>', unsafe_allow_html=True)
+    st.table(pd.DataFrame(ss.crm_queue))
+
+# 마지막 봇 답변 TTS
+if tts_on and ss.last_bot:
+    tts_play(ss.last_bot)
+
+# 동의 안내
+st.markdown('<div class="smallnote">※ 개인화 기능은 고객 동의(마케팅/개인화)에 기반한 데모입니다. 실제 서비스 연동 시 감사 로그/민감정보 마스킹을 준수하세요.</div>', unsafe_allow_html=True)
