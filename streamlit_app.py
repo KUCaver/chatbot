@@ -1,4 +1,4 @@
-# streamlit_app.py — 폰 내부 UI(네비/버튼/메시지/결제) 올인원
+# streamlit_app.py — 폰 테두리 안에 전부 넣는 POC
 # 설치: pip install -U streamlit google-generativeai gTTS pillow pandas
 import os, io, json, time, base64, math, random, re
 import streamlit as st
@@ -6,15 +6,17 @@ import pandas as pd
 from PIL import Image, ImageDraw
 from gtts import gTTS
 
-st.set_page_config(page_title="아바타 금융 코치 (폰 UI)", page_icon="📱", layout="wide")
-PHONE_W, PHONE_H = 420, 840  # 폰 크기 키움
+# ----------------- 기본 설정 -----------------
+st.set_page_config(page_title="아바타 금융 코치 (폰 내부 UI)", page_icon="📱", layout="centered")
 
-# ───────────────────── 사이드바: 키/상태 ─────────────────────
+PHONE_W, PHONE_H = 420, 840  # 폰 크기 (원하면 더 키워도 됨)
+
 with st.sidebar:
     st.header("설정")
     key_from_sidebar = st.text_input("Gemini API Key (GOOGLE_API_KEY)", type="password")
     API_KEY = st.secrets.get("GOOGLE_API_KEY","") or os.getenv("GOOGLE_API_KEY","") or key_from_sidebar
     st.caption("키가 없으면 규칙기반 데모 모드로 동작합니다.")
+    media = st.file_uploader("아바타 배경(선택, PNG/JPG/MP4)", type=["png","jpg","jpeg","mp4"])
 
 USE_LLM, MODEL = False, None
 if API_KEY:
@@ -26,8 +28,8 @@ if API_KEY:
     except Exception as e:
         st.sidebar.error(f"Gemini 초기화 실패: {e}")
 
-# ───────────────────── 유틸/샘플 ─────────────────────
-def money(x): 
+# ----------------- 유틸/샘플 -----------------
+def money(x):
     try: return f"{int(x):,}원"
     except: return str(x)
 
@@ -90,9 +92,9 @@ def plan_goal(goal_name:str, target_amt:int, months:int, risk:str, seed:int=0):
     return {"goal":goal_name,"target":target_amt,"months":months,"monthly":monthly,
             "mix":mix,"assumed_yields":assumed,"progress":progress}
 
-# ───────────────────── 세션 상태 ─────────────────────
-if "phone_tab" not in st.session_state: st.session_state.phone_tab="home"
-if "msgs" not in st.session_state: st.session_state.msgs=[]
+# ----------------- 세션 상태 -----------------
+if "tab" not in st.session_state: st.session_state.tab="home"
+if "msgs" not in st.session_state: st.session_state.msgs=[("bot","어서 오세요. 어떤 금융 고민을 도와드릴까요?")]
 if "pay" not in st.session_state:
     st.session_state.pay={"merchant":"스타커피","mcc":"CAFE","amount":12800,"auto":True,"usage":{"Alpha Card":5000}}
 if "goal" not in st.session_state:
@@ -100,228 +102,182 @@ if "goal" not in st.session_state:
 if "txlog" not in st.session_state:
     st.session_state.txlog=SAMPLE_TX.copy()
 
-# ───────────────────── CSS (폰 내부 레이아웃) ─────────────────────
+# ----------------- 폰 스타일 -----------------
 st.markdown(f"""
 <style>
-.phone-wrap {{
-  width:{PHONE_W}px; height:{PHONE_H}px; margin:0 auto;
-  border:14px solid #111; border-radius:36px; background:#000; position:relative;
-  box-shadow:0 12px 30px rgba(0,0,0,.35); overflow:hidden;
-}}
-.statusbar {{ height:20px; background:rgba(255,255,255,.06); }}
-.navbar {{
-  height:48px; background:rgba(255,255,255,.08); display:flex; align-items:center;
-  gap:10px; padding:0 10px; color:#fff; font-size:14px;
-}}
-.navbtn {{
-  padding:6px 10px; border-radius:10px; border:1px solid rgba(255,255,255,.18);
-  background:rgba(255,255,255,.06); cursor:pointer; user-select:none;
-}}
+.phone {{ width:{PHONE_W}px; height:{PHONE_H}px; border:14px solid #111; border-radius:36px;
+          overflow:hidden; position:relative; background:#000; box-shadow:0 12px 30px rgba(0,0,0,.35); }}
+.bg    {{ position:absolute; inset:0; }}
+.bg img, .bg video {{ width:100%; height:100%; object-fit:cover; filter:brightness(.95); }}
+.scrim {{ position:absolute; inset:0; background:linear-gradient(to bottom, rgba(0,0,0,.15), rgba(0,0,0,.35)); }}
+.statusbar {{ position:absolute; left:0; right:0; top:0; height:22px; background:rgba(0,0,0,.35); }}
+.navbar {{ position:absolute; left:10px; right:10px; top:26px; height:46px;
+          display:flex; gap:8px; align-items:center; justify-content:space-between; }}
+.navbtn {{ flex:1; height:38px; border-radius:12px; border:1px solid rgba(255,255,255,.18);
+          background:rgba(255,255,255,.10); color:#fff; font-size:14px; }}
 .navbtn.active {{ background:#2b6cff; border-color:#2b6cff; }}
-.body {{ position:absolute; top:68px; bottom:84px; left:0; right:0; overflow:hidden; }}
-.scroll {{ position:absolute; top:0; bottom:0; left:0; right:0; overflow:auto; padding:12px; }}
-.msg {{ margin:8px 0; display:flex; }}
-.msg.user {{ justify-content:flex-end; }}
-.bubble {{
-  max-width:74%; padding:10px 12px; color:#111; background:#fff; border-radius:16px;
-  box-shadow:0 2px 8px rgba(0,0,0,.18); word-wrap:break-word; line-height:1.35;
-}}
+.body  {{ position:absolute; left:0; right:0; top:78px; bottom:86px; overflow:auto; padding:12px; }}
+.msg   {{ margin:8px 0; display:flex; }}
+.msg .bubble {{ background:rgba(255,255,255,.92); color:#111; padding:10px 12px; border-radius:16px;
+               box-shadow:0 2px 8px rgba(0,0,0,.18); max-width:78%; line-height:1.35; }}
+.msg.user { justify-content:flex-end; }
 .msg.user .bubble {{ background:#DCF3FF; }}
 .cardgrid {{ display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }}
-.paycard {{ background:#111; border-radius:14px; padding:8px; text-align:center; color:#eee; }}
-.footer {{
-  position:absolute; left:0; right:0; bottom:0; height:84px; background:#0f1116;
-  padding:10px; display:flex; gap:8px; align-items:center;
-}}
-.input {{ flex:1; height:40px; border-radius:22px; border:1px solid #333; background:#12151c;
-  color:#eee; padding:0 14px; outline:none; }}
-.btn {{ height:40px; padding:0 16px; border:none; border-radius:18px; background:#2b6cff; color:white; cursor:pointer; }}
-.smallbtn {{ height:32px; padding:0 10px; border:none; border-radius:10px; background:#2b6cff; color:white; cursor:pointer; }}
-.row {{ display:flex; align-items:center; gap:8px; margin:8px 0; }}
-.kv {{ background:#0f1116; border:1px solid #222; border-radius:10px; padding:6px 8px; color:#bbb; font-size:12px; }}
-.center {{ text-align:center; color:#aaa; margin-top:4px; }}
+.paycard {{ background:rgba(0,0,0,.45); border:1px solid rgba(255,255,255,.15); border-radius:14px; padding:8px; text-align:center; color:#eee; }}
+.footer{{ position:absolute; left:0; right:0; bottom:0; height:86px; background:rgba(0,0,0,.55);
+          padding:10px; display:flex; gap:8px; align-items:center; backdrop-filter: blur(6px); }}
+.input {{ flex:1; height:40px; border-radius:22px; border:1px solid rgba(255,255,255,.25);
+          background:rgba(255,255,255,.08); color:#fff; padding:0 14px; }}
+.send  {{ height:40px; padding:0 16px; border:none; border-radius:18px; background:#2b6cff; color:#fff; }}
+.label { color:#eee; font-size:13px; margin:6px 0 4px; }
+.row   { display:flex; gap:8px; align-items:center; }
+.select, .number, .toggle, .btn { height:36px; border-radius:10px; border:1px solid rgba(255,255,255,.2);
+          background:rgba(255,255,255,.08); color:#fff; padding:4px 10px; }
+.btn   { background:#2b6cff; border-color:#2b6cff; }
+.small { font-size:12px; opacity:.8; }
+.center{ text-align:center; color:#ddd; margin:10px 0 0; }
+.metric{ color:#fff; }
 </style>
 """, unsafe_allow_html=True)
 
-# ───────────────────── 렌더 함수 ─────────────────────
-def html_messages(items):
-    # items: list[(role, text)]
-    html=""
-    for role,text in items:
-        role_cls = "user" if role=="user" else "bot"
-        html += f'<div class="msg {role_cls}"><div class="bubble">{text}</div></div>'
-    return html
+# ----------------- 배경 준비 -----------------
+bg_html = '<div class="bg"><div style="width:100%;height:100%;background:#111;"></div></div>'
+if media:
+    b = media.read()
+    if media.type=="video/mp4":
+        b64 = base64.b64encode(b).decode()
+        bg_html = f'<div class="bg"><video autoplay muted loop playsinline src="data:video/mp4;base64,{b64}"></video></div>'
+    else:
+        b64 = base64.b64encode(b).decode()
+        bg_html = f'<div class="bg"><img src="data:image/png;base64,{b64}" /></div>'
 
-def tab_button(label, tab_key):
-    active = "active" if st.session_state.phone_tab == tab_key else ""
-    # Streamlit 버튼 대신 HTML 버튼 + form submit
-    st.markdown(
-        f"""
-        <form action="" method="get">
-          <button class="navbtn {active}" name="{tab_key}" type="submit">{label}</button>
-        </form>
-        """, unsafe_allow_html=True
-    )
-    # 쿼리로 오염되는 걸 막기 위해, 아래에서 Streamlit 버튼도 병행 제공
-    return st.button(f"{label}", key=f"__{tab_key}", help="상단 버튼이 보이지 않으면 이 버튼을 누르세요.")
+# ----------------- 폰 시작 -----------------
+st.markdown('<div class="phone">', unsafe_allow_html=True)
+st.markdown(bg_html, unsafe_allow_html=True)
+st.markdown('<div class="scrim"></div><div class="statusbar"></div>', unsafe_allow_html=True)
 
-def switch_tab_from_buttons():
-    c1,c2,c3,c4 = st.columns(4)
-    if c1.button("🏠 홈", key="nav_home"): st.session_state.phone_tab="home"
-    if c2.button("💳 결제", key="nav_pay"): st.session_state.phone_tab="pay"
-    if c3.button("🎯 목표", key="nav_goal"): st.session_state.phone_tab="goal"
-    if c4.button("📅 일정", key="nav_cal"): st.session_state.phone_tab="calendar"
+# 상단 네비 (폰 내부)
+n_home, n_pay, n_goal, n_cal = st.columns(4)
+with n_home:
+    st.markdown(f'<button class="navbtn {"active" if st.session_state.tab=="home" else ""}">🏠 홈</button>', unsafe_allow_html=True)
+    if st.button(" ", key="nav_home_hidden"): st.session_state.tab="home"  # 클릭 대체(표면상 보이지 않게)
+with n_pay:
+    st.markdown(f'<button class="navbtn {"active" if st.session_state.tab=="pay" else ""}">💳 결제</button>', unsafe_allow_html=True)
+    if st.button("  ", key="nav_pay_hidden"): st.session_state.tab="pay"
+with n_goal:
+    st.markdown(f'<button class="navbtn {"active" if st.session_state.tab=="goal" else ""}">🎯 목표</button>', unsafe_allow_html=True)
+    if st.button("   ", key="nav_goal_hidden"): st.session_state.tab="goal"
+with n_cal:
+    st.markdown(f'<button class="navbtn {"active" if st.session_state.tab=="calendar" else ""}">📅 일정</button>', unsafe_allow_html=True)
+    if st.button("    ", key="nav_cal_hidden"): st.session_state.tab="calendar"
 
-# ───────────────────── 메인 레이아웃(폰 1칼럼) ─────────────────────
-col_phone, col_info = st.columns([1,1], vertical_alignment="top")
+# 본문 시작
+st.markdown('<div class="body">', unsafe_allow_html=True)
 
-with col_phone:
-    st.markdown('<div class="phone-wrap">', unsafe_allow_html=True)
-    st.markdown('<div class="statusbar"></div>', unsafe_allow_html=True)
+# --- 홈(메시지 + 최근 거래) ---
+if st.session_state.tab=="home":
+    for role, text in st.session_state.msgs:
+        cls = "user" if role=="user" else ""
+        st.markdown(f'<div class="msg {cls}"><div class="bubble">{text}</div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="center">— 최근 거래/알림 —</div>', unsafe_allow_html=True)
+    st.dataframe(st.session_state.txlog, height=220, use_container_width=True)
 
-    # 상단 네비(폰 내부)
-    st.markdown('<div class="navbar">', unsafe_allow_html=True)
-    n1,n2,n3,n4 = st.columns(4)
-    with n1:
-        if st.session_state.phone_tab=="home": st.markdown('<div class="navbtn active">🏠 홈</div>', unsafe_allow_html=True)
-        else:
-            if st.button("🏠 홈", key="top_home", use_container_width=True): st.session_state.phone_tab="home"
-    with n2:
-        if st.session_state.phone_tab=="pay": st.markdown('<div class="navbtn active">💳 결제</div>', unsafe_allow_html=True)
-        else:
-            if st.button("💳 결제", key="top_pay", use_container_width=True): st.session_state.phone_tab="pay"
-    with n3:
-        if st.session_state.phone_tab=="goal": st.markdown('<div class="navbtn active">🎯 목표</div>', unsafe_allow_html=True)
-        else:
-            if st.button("🎯 목표", key="top_goal", use_container_width=True): st.session_state.phone_tab="goal"
-    with n4:
-        if st.session_state.phone_tab=="calendar": st.markdown('<div class="navbtn active">📅 일정</div>', unsafe_allow_html=True)
-        else:
-            if st.button("📅 일정", key="top_cal", use_container_width=True): st.session_state.phone_tab="calendar"
-    st.markdown('</div>', unsafe_allow_html=True)
+# --- 결제 ---
+elif st.session_state.tab=="pay":
+    p=st.session_state.pay
+    st.markdown('<div class="label">가맹점 / 금액 / 자동결제</div>', unsafe_allow_html=True)
+    c1,c2,c3 = st.columns([2,2,1])
+    with c1:
+        merchant = st.selectbox("", ["스타커피","버거팰리스","메가시네마","김밥왕"], index=["스타커피","버거팰리스","메가시네마","김밥왕"].index(p["merchant"]), label_visibility="collapsed")
+    with c2:
+        amount = st.number_input("", min_value=1000, value=int(p["amount"]), step=500, label_visibility="collapsed")
+    with c3:
+        auto = st.toggle("자동", value=p["auto"])
+    mcc = {"스타커피":"CAFE","버거팰리스":"FNB","김밥왕":"FNB","메가시네마":"CINE"}[merchant]
+    st.session_state.pay.update({"merchant":merchant,"mcc":mcc,"amount":amount,"auto":auto})
 
-    # 본문 스크롤 영역
-    st.markdown('<div class="body"><div class="scroll">', unsafe_allow_html=True)
+    best, top3 = estimate_saving(amount, mcc, SAMPLE_RULES, p["usage"])
+    st.markdown('<div class="label">추천 카드 Top3</div>', unsafe_allow_html=True)
+    grid = st.columns(3)
+    for i,(nm,sv,nt) in enumerate(top3):
+        with grid[i]:
+            b64 = card_png_b64(nm, next((r["color"] for r in SAMPLE_RULES if r["name"]==nm), "#5B8DEF"))
+            st.markdown(
+                f'<div class="paycard"><img src="data:image/png;base64,{b64}" style="width:100%;border-radius:12px;"/>'
+                f'<div style="font-weight:700;margin-top:6px">{nm}</div>'
+                f'<div class="small">절약 {money(sv)}</div><div class="small">{nt}</div></div>',
+                unsafe_allow_html=True
+            )
+    st.markdown(f'<div class="metric">현재 최적: <b>{best[0]}</b> · 절약 {money(best[1])}</div>', unsafe_allow_html=True)
 
-    tab = st.session_state.phone_tab
-    if tab=="home":
-        if not st.session_state.msgs:
-            st.session_state.msgs=[("bot","어서 오세요. 어떤 금융 고민을 도와드릴까요?")]
-        st.markdown(html_messages(st.session_state.msgs), unsafe_allow_html=True)
-        st.markdown('<div class="center">— 최근 거래/알림 —</div>', unsafe_allow_html=True)
-        st.dataframe(st.session_state.txlog, use_container_width=True, height=220)
+    if st.button("✅ 결제 실행", use_container_width=True):
+        applied = best[0] if auto else top3[0][0]
+        newrow={"date":time.strftime("%Y-%m-%d"),"merchant":merchant,"mcc":mcc,"amount":amount}
+        st.session_state.txlog = pd.concat([pd.DataFrame([newrow]), st.session_state.txlog]).reset_index(drop=True)
+        st.session_state.msgs.append(("bot", f"{merchant} {money(amount)} 결제 완료! 적용 카드 {applied} · 절약 {money(best[1])}"))
+        st.success("결제 완료!")
 
-    elif tab=="pay":
-        p=st.session_state.pay
-        # 입력(폰 내부): 가맹점/금액/자동결제
-        c1,c2=st.columns(2)
-        with c1:
-            merchant = st.selectbox("가맹점", ["스타커피","버거팰리스","메가시네마","김밥왕"],
-                                    index=["스타커피","버거팰리스","메가시네마","김밥왕"].index(p["merchant"]))
-        with c2:
-            amount = st.number_input("금액(원)", min_value=1000, value=int(p["amount"]), step=500)
-        mcc = {"스타커피":"CAFE","버거팰리스":"FNB","김밥왕":"FNB","메가시네마":"CINE"}[merchant]
-        auto = st.toggle("자동 결제 라우팅", value=p["auto"])
-        st.session_state.pay.update({"merchant":merchant,"mcc":mcc,"amount":amount,"auto":auto})
+# --- 목표 ---
+elif st.session_state.tab=="goal":
+    g=st.session_state.goal
+    goal = st.text_input("목표 이름", value=g["goal"])
+    c1,c2 = st.columns(2)
+    with c1:
+        target = st.number_input("목표 금액(원)", min_value=100000, value=int(g["target"]), step=100000)
+    with c2:
+        months = st.number_input("기간(개월)", min_value=1, value=int(g["months"]))
+    risk = st.selectbox("위험 성향", ["낮음","보통","높음"], index=1)
+    if st.button("목표 저장/갱신", use_container_width=True):
+        st.session_state.goal = plan_goal(goal, int(target), int(months), risk)
+        st.session_state.msgs.append(("bot", f"'{goal}' 플랜 저장! 월 {money(st.session_state.goal['monthly'])} 권장."))
 
-        st.markdown("---")
-        # 추천 카드 Top3 (폰 내부)
-        best, top3 = estimate_saving(amount, mcc, SAMPLE_RULES, p["usage"])
-        st.markdown("**추천 카드 Top3**")
-        html_cards = '<div class="cardgrid">'
-        for nm,sv,nt in top3:
-            color = next((r["color"] for r in SAMPLE_RULES if r["name"]==nm), "#5B8DEF")
-            b64 = card_png_b64(nm, color)
-            html_cards += f'''
-              <div class="paycard">
-                <img src="data:image/png;base64,{b64}" style="width:100%;border-radius:12px;"/>
-                <div style="font-weight:700;margin-top:6px">{nm}</div>
-                <div style="font-size:13px;opacity:.9">절약 {money(sv)}</div>
-                <div style="font-size:12px;opacity:.7">{nt}</div>
-              </div>'''
-        html_cards += '</div>'
-        st.markdown(html_cards, unsafe_allow_html=True)
-        st.info(f"현재 최적 카드: **{best[0]}** · 예상 절약 {money(best[1])}")
-
-        # 결제 실행(모의)
-        if st.button("✅ 결제 실행", use_container_width=True):
-            applied = best[0] if auto else top3[0][0]
-            newrow={"date":time.strftime("%Y-%m-%d"),"merchant":merchant,"mcc":mcc,"amount":amount}
-            st.session_state.txlog = pd.concat([pd.DataFrame([newrow]), st.session_state.txlog]).reset_index(drop=True)
-            st.session_state.msgs.append(("bot", f"{merchant} {money(amount)} 결제 완료! 적용 카드 {applied} · 절약 {money(best[1])}"))
-            st.success(f"결제 완료! 적용 {applied}")
-            st.balloons()
-
-    elif tab=="goal":
-        g=st.session_state.goal
-        goal = st.text_input("목표 이름", value=g["goal"])
-        c1,c2=st.columns(2)
-        with c1:
-            target = st.number_input("목표 금액(원)", min_value=100000, value=int(g["target"]), step=100000)
-        with c2:
-            months = st.number_input("기간(개월)", min_value=1, value=int(g["months"]))
-        risk = st.selectbox("위험 성향", ["낮음","보통","높음"], index=1)
-        if st.button("목표 저장/갱신", use_container_width=True):
-            st.session_state.goal = plan_goal(goal, int(target), int(months), risk)
-            st.session_state.msgs.append(("bot", f"'{goal}' 플랜 저장! 월 {money(st.session_state.goal['monthly'])} 권장."))
-            st.toast("목표가 갱신되었어요.")
-        g = st.session_state.goal
-        st.progress(min(g["progress"],100)/100, text=f"진행률 {g['progress']}%")
-        st.write("권장 월 납입:", money(g["monthly"]))
-        st.json(g["mix"], expanded=False)
-        rows=[{"월":i+1, "권장 납입": g["monthly"], "누적": g["monthly"]*(i+1)} for i in range(g["months"])]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, height=220)
-
-    else:  # calendar
-        now=time.strftime("%Y-%m")
-        df=pd.DataFrame([
-            {"날짜":f"{now}-05","제목":"적금 만기 확인","메모":"만기연장/이자이체"},
-            {"날짜":f"{now}-15","제목":"카드 납부일","메모":"자동이체 확인"},
-            {"날짜":f"{now}-28","제목":"여행 적립 체크","메모":"목표 리포트"},
-        ])
-        st.table(df)
-
-    # 본문 끝
-    st.markdown('</div></div>', unsafe_allow_html=True)
-
-    # 폰 하단 입력바(메시지 → 버블로 표시)
-    st.markdown('<div class="footer">', unsafe_allow_html=True)
-    with st.form("phone_input", clear_on_submit=True):
-        c1,c2 = st.columns([6,1])
-        with c1:
-            user_msg = st.text_input("메시지 입력", key="__msg", label_visibility="collapsed")
-        with c2:
-            submitted = st.form_submit_button("보내기")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    if submitted and user_msg.strip():
-        st.session_state.msgs.append(("user", user_msg.strip()))
-        # 간단 라우팅: 결제/목표/핸드오프 키워드 처리
-        low = user_msg.lower()
-        if any(k in low for k in ["결제","pay","카드 추천"]):
-            st.session_state.phone_tab="pay"
-        elif any(k in low for k in ["목표","포트폴리오","플랜"]):
-            st.session_state.phone_tab="goal"
-        elif USE_LLM and MODEL:
-            try:
-                history = "\n".join([("User: "+t if r=="user" else "Assistant: "+t) for r,t in st.session_state.msgs[-8:]])
-                res = MODEL.generate_content(history+"\nAssistant:")
-                reply = getattr(res,"text","").strip() or "도와드릴 내용이 있나요?"
-            except Exception as e:
-                reply = f"[LLM 오류: {e}]"
-            st.session_state.msgs.append(("bot", reply))
-        else:
-            st.session_state.msgs.append(("bot","/결제, /목표 같은 키워드를 보내보세요!"))
-        st.rerun()
-
-    st.markdown('</div>', unsafe_allow_html=True)  # phone-wrap 닫기
-
-with col_info:
-    st.subheader("우측 정보 패널(데모)")
     g = st.session_state.goal
-    st.metric("권장 월 납입", money(g["monthly"]))
-    st.progress(min(g["progress"],100)/100, text=f"목표 진행률 {g['progress']}%")
-    pay = st.session_state.pay
-    best,_ = estimate_saving(pay["amount"], pay["mcc"], SAMPLE_RULES, pay["usage"])
-    st.metric("현재 최적 카드", best[0], delta=f"절약 {money(best[1])}")
-    st.caption("※ 실제 결제/지오펜싱/CRM 연동은 PoC에서 모의로 시연합니다.")
+    st.progress(min(g["progress"],100)/100, text=f"진행률 {g['progress']}%")
+    st.markdown(f"권장 월 납입: **{money(g['monthly'])}**")
+    st.json(g["mix"], expanded=False)
+    rows=[{"월":i+1, "권장 납입": g["monthly"], "누적": g["monthly"]*(i+1)} for i in range(g["months"])]
+    st.dataframe(pd.DataFrame(rows), height=220, use_container_width=True)
+
+# --- 일정 ---
+else:
+    now=time.strftime("%Y-%m")
+    df=pd.DataFrame([
+        {"날짜":f"{now}-05","제목":"적금 만기 확인","메모":"만기연장/이자이체"},
+        {"날짜":f"{now}-15","제목":"카드 납부일","메모":"자동이체 확인"},
+        {"날짜":f"{now}-28","제목":"여행 적립 체크","메모":"목표 리포트"},
+    ])
+    st.table(df)
+
+# 본문 끝
+st.markdown('</div>', unsafe_allow_html=True)
+
+# 하단 입력바(폰 내부)
+with st.form("__phone_input", clear_on_submit=True):
+    c1,c2 = st.columns([6,1])
+    with c1:
+        user_msg = st.text_input("", placeholder="메시지를 입력하세요. (예: 스타커피 12800원 결제 추천)", label_visibility="collapsed")
+    with c2:
+        submitted = st.form_submit_button("보내기", use_container_width=True)
+if submitted and user_msg.strip():
+    st.session_state.msgs.append(("user", user_msg.strip()))
+    low = user_msg.lower()
+    if any(k in low for k in ["결제","pay","카드 추천","스타커피","버거","영화","김밥"]):
+        st.session_state.tab="pay"
+    elif any(k in low for k in ["목표","포트폴리오","플랜"]):
+        st.session_state.tab="goal"
+    elif any(k in low for k in ["일정","캘린더"]):
+        st.session_state.tab="calendar"
+    elif USE_LLM and MODEL:
+        try:
+            history = "\n".join([("User: "+t if r=="user" else "Assistant: "+t) for r,t in st.session_state.msgs[-8:]])
+            res = MODEL.generate_content(history+"\nAssistant:")
+            reply = getattr(res,"text","").strip() or "도와드릴 내용이 있나요?"
+        except Exception as e:
+            reply = f"[LLM 오류: {e}]"
+        st.session_state.msgs.append(("bot", reply))
+    else:
+        st.session_state.msgs.append(("bot","/결제, /목표, /일정 같은 키워드로도 이동할 수 있어요."))
+    st.rerun()
+
+# 폰 끝
+st.markdown('</div>', unsafe_allow_html=True)
