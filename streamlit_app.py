@@ -1,5 +1,6 @@
-# streamlit_app.py — '폰' 단일화면 + 아바타 + LLM 인텐트 + 결제직전최적화 + 핸드오프 + 교육 + 게이미피케이션 (PoC)
+# streamlit_app.py — '폰' 단일화면 + (수정) 채팅 옆 원형 아바타 + 기존 기능(TTS/결제/목표/일정/용어/감사로그) 유지
 # 설치: pip install -U streamlit google-generativeai pillow pandas gTTS
+
 import os, io, json, time, base64, math, random, datetime
 import streamlit as st
 import pandas as pd
@@ -18,6 +19,7 @@ html, body {{ background:#0b0d12; }}
   border:12px solid #101012; border-radius:30px; background:#0f1116;
   box-shadow:0 16px 40px rgba(0,0,0,.4);
 }}
+
 /* 공통 */
 .hint {{ color:#8a96ac; font-size:.82rem; }}
 .chip {{ background:#121826; color:#dfe8ff; border:1px solid #20293c;
@@ -32,14 +34,37 @@ html, body {{ background:#0b0d12; }}
           background:#121722; color:#e9eefc; font-size:.9rem; }}
 .navbtn.active {{ background:#2b6cff; border-color:#2b6cff; color:#fff; }}
 
-/* 히어로 */
+/* 히어로(배경만) */
 .hero {{ height:300px; border-radius:16px; overflow:hidden; position:relative; }}
 .hero img {{ width:100%; height:100%; object-fit:cover; }}
 .scrim {{ position:absolute; inset:0; background:linear-gradient(180deg,rgba(0,0,0,.05),rgba(0,0,0,.45));}}
 .hero-content {{ position:absolute; left:12px; right:12px; bottom:12px; display:flex; gap:8px; flex-wrap:wrap; }}
 .bubble {{ background:rgba(255,255,255,.92); color:#111; padding:10px 12px; border-radius:14px; box-shadow:0 2px 8px rgba(0,0,0,.2); }}
 
-/* 채팅 */
+/* 채팅 레이아웃: 왼쪽 원형 아바타 + 오른쪽 말풍선 */
+.chatGrid {{ display:grid; grid-template-columns:96px 1fr; gap:12px; align-items:flex-start; }}
+.chatDock {{ position:sticky; top:10px; }}
+.avaWrap {{
+  position:relative; width:88px; height:88px; border-radius:50%; overflow:hidden;
+  border:2px solid #2a3558; background:#0e1220;
+  box-shadow:0 8px 24px rgba(0,0,0,.38), 0 0 0 4px rgba(16,18,26,.35);
+}}
+.avaWrap img {{ width:100%; height:100%; object-fit:cover; border-radius:50%; display:block; }}
+.onlineDot {{
+  position:absolute; right:4px; bottom:6px; width:16px; height:16px; border-radius:50%;
+  background:#22c55e; border:2px solid #0f1116; box-shadow:0 0 0 4px rgba(34,197,94,.25);
+  animation:avaPulse 2s infinite ease-out;
+}}
+@keyframes avaPulse {{
+  0% {{ box-shadow:0 0 0 4px rgba(34,197,94,.25); }}
+  50% {{ box-shadow:0 0 0 7px rgba(34,197,94,.12); }}
+  100% {{ box-shadow:0 0 0 4px rgba(34,197,94,.25); }}
+}}
+.avaName {{
+  margin-top:8px; color:#dfe8ff; font-size:.8rem; text-align:center;
+  background:#141c33; border:1px solid #2a3558; border-radius:999px; padding:.18rem .5rem;
+}}
+
 .msgbox {{ display:flex; flex-direction:column; gap:8px; }}
 .msg {{ display:flex; }}
 .msg .balloon {{ max-width:88%; padding:10px 12px; border-radius:14px; line-height:1.35;
@@ -51,37 +76,36 @@ html, body {{ background:#0b0d12; }}
 .cardgrid {{ display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }}
 .paycard {{ background:#0d1320; border:1px solid #223049; border-radius:12px; padding:8px; color:#e2e8f6; text-align:center; }}
 
-/* 하단 입력 */
+/* 입력창 */
 .footer {{ display:flex; gap:8px; margin-top:8px; }}
 .input {{ flex:1; height:40px; border-radius:20px; border:1px solid #2a2f3a; background:#0f1420; color:#e9eefc; padding:0 12px; }}
 .send {{ height:40px; padding:0 16px; border:none; border-radius:12px; background:#2b6cff; color:#fff; }}
 
-/* 아바타: 히어로 내부에 고정 */
-.avatar {{
-  position:absolute; right:14px; top:14px; width:72px; height:72px; border-radius:50%;
-  border:2px solid #2a3552; overflow:hidden; box-shadow:0 8px 24px rgba(0,0,0,.35);
-}}
-.avatar img {{ width:100%; height:100%; object-fit:cover; }}
-.avatarTag {{
-  position:absolute; right:12px; top:96px; background:#1b2340; color:#dfe8ff; font-size:.75rem;
-  border:1px solid #2b3558; padding:.2rem .5rem; border-radius:999px; box-shadow:0 2px 8px rgba(0,0,0,.2);
-}}
-
 .smallnote {{ font-size:.78rem; color:#98a3bb; }}
-.badge {{ display:inline-block; padding:.22rem .5rem; border:1px solid #2a3558; border-radius:999px; margin-right:4px; font-size:.75rem; color:#dfe8ff; background:#141c33;}}
+.badge {{ display:inline-block; padding:.22rem .5rem; border:1px solid #2a3558; border-radius:999px; margin-right:4px; font-size:.75rem; color:#dfe8ff; background:#141c33; }}
 </style>
 """, unsafe_allow_html=True)
 
 # ------------------ 사이드 옵션 ------------------
 with st.sidebar:
     st.header("옵션")
+    # secrets.toml 없어도 터지지 않도록 안전 가드
+    def safe_get_secret(key, default=""):
+        try:
+            return st.secrets.get(key, default)
+        except Exception:
+            return default
+
     key_from_sidebar = st.text_input("Gemini API Key (선택)", type="password")
-    API_KEY = st.secrets.get("GOOGLE_API_KEY","") or os.getenv("GOOGLE_API_KEY","") or key_from_sidebar
+    API_KEY = safe_get_secret("GOOGLE_API_KEY","") or os.getenv("GOOGLE_API_KEY","") or key_from_sidebar
     st.caption("키가 없으면 규칙 기반으로만 동작합니다.")
     hero_up = st.file_uploader("히어로(배경) 이미지", type=["png","jpg","jpeg"])
     avatar_up = st.file_uploader("아바타 이미지(선택)", type=["png","jpg","jpeg"])
     tts_on = st.toggle("봇 답변 음성(TTS) 재생", value=False)
     geo_sim = st.toggle("지오펜싱 결제추천(시뮬레이션)", value=False)
+    # 아바타 이름 바꾸기
+    ss_name = st.session_state.get("avatar_name", "아바타 코치")
+    st.session_state["avatar_name"] = st.text_input("아바타 이름", value=ss_name, max_chars=16)
 
 # ------------------ 안전한 업로드 → base64 ------------------
 def upload_to_b64(file):
@@ -283,7 +307,6 @@ def llm_explain(user_msg:str):
     except: return None
 
 def llm_glossary(query:str):
-    """금융 용어/약관 요약 모듈"""
     if not USE_LLM: return None
     sys = ("금융 초심자 눈높이로 쉬운 비유와 수치 예시 포함해 5줄 이내 요약. 필요시 주의점 1개.")
     prompt = f"{sys}\n용어/문구: {query}\n한국어로:"
@@ -304,11 +327,11 @@ ss = st.session_state
 if "tab" not in ss: ss.tab="home"
 if "msgs" not in ss: ss.msgs=[("bot","어서 오세요. 어떤 금융 고민을 도와드릴까요?")]
 if "last_bot" not in ss: ss.last_bot = ss.msgs[-1][1]
-if "badges" not in ss: ss.badges=set()           # 게이미피케이션
-if "crm_queue" not in ss: ss.crm_queue=[]        # 상담사 핸드오프 큐(요약/근거)
-if "audit" not in ss: ss.audit=[]                # 감사 로그(요약/권유 근거)
+if "badges" not in ss: ss.badges=set()
+if "crm_queue" not in ss: ss.crm_queue=[]
+if "audit" not in ss: ss.audit=[]
 
-# ------------------ 히어로 + 아바타 ------------------
+# ------------------ 히어로(배경만: 아바타 제거) ------------------
 st.markdown("### ")
 with st.container():
     st.markdown('<div class="hero">', unsafe_allow_html=True)
@@ -321,20 +344,6 @@ with st.container():
         """, unsafe_allow_html=True)
     st.markdown('<div class="scrim"></div>', unsafe_allow_html=True)
 
-    # 아바타(히어로 내부 고정)
-    st.markdown('<div class="avatar">', unsafe_allow_html=True)
-    if avatar_b64:
-        st.markdown(f'<img src="data:image/png;base64,{avatar_b64}">', unsafe_allow_html=True)
-    else:
-        # 텍스트 아바타 생성
-        av = Image.new("RGB",(200,200),(21,27,46)); d=ImageDraw.Draw(av)
-        d.ellipse((4,4,196,196), fill=(33,41,72))
-        d.text((80,86), "AVA", fill=(220,230,255))
-        buf=io.BytesIO(); av.save(buf,format="PNG")
-        st.markdown(f'<img src="data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}">', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-    st.markdown('<div class="avatarTag">아바타 코치</div>', unsafe_allow_html=True)
-
     # 칩/버블
     prof = CUSTOMER["profile"]
     chips = [
@@ -345,7 +354,7 @@ with st.container():
     ]
     st.markdown('<div class="hero-content">', unsafe_allow_html=True)
     for c in chips: st.markdown(f'<span class="chip">{c}</span>', unsafe_allow_html=True)
-    st.markdown('<div class="bubble">어서 오세요. 어떤 금융 고민을 도와드릴까요?</div>', unsafe_allow_html=True)
+    st.markdown('<div class="bubble">배경은 여기! 채팅에선 아바타가 옆에서 지켜봐요. 👀</div>', unsafe_allow_html=True)
     st.markdown('</div></div>', unsafe_allow_html=True)
 
 # ------------------ 네비 ------------------
@@ -368,7 +377,6 @@ acc_dep = next(a for a in CUSTOMER["accounts"] if a["type"]=="입출금")
 card_acc = next(a for a in CUSTOMER["accounts"] if a["type"]=="신용카드")
 _util = credit_utilization()
 _alerts = []
-
 if low_balance(): _alerts.append(f"입출금 잔액이 낮아요({money(acc_dep['balance'])}). 예정 이체 확인.")
 if _util >= 0.8: _alerts.append(f"신용카드 이용률 높음({_util*100:.0f}%). 분할/유예 검토.")
 _due = due_within(10)
@@ -377,7 +385,6 @@ if _due:
     _alerts.append(f"다가오는 일정: {titles}")
 if geo_sim:
     _alerts.append("근처 '스타커피' 감지 → CAFE 가맹점 최적 카드 추천 활성.")
-
 for a in _alerts: st.toast(a, icon="⚠️")
 
 # ------------------ 본문 ------------------
@@ -388,12 +395,37 @@ if tab=="home":
     with st.expander("📌 오늘의 요약", expanded=True):
         st.write(llm_daily_brief())
 
-    # 대화
+    # ===== 채팅: 왼쪽 원형 아바타(스티키) + 오른쪽 말풍선 =====
     st.markdown('<div class="section">', unsafe_allow_html=True)
     st.markdown('<div class="label">대화</div>', unsafe_allow_html=True)
-    for role, text in ss.msgs:
-        cls = "user" if role=="user" else ""
-        st.markdown(f'<div class="msgbox"><div class="msg {cls}"><div class="balloon">{text}</div></div></div>', unsafe_allow_html=True)
+    colL, colR = st.columns([1,6], gap="small")
+
+    with colL:
+        # 아바타 이미지 준비(원형)
+        if avatar_b64:
+            ava_src = f"data:image/png;base64,{avatar_b64}"
+        else:
+            av = Image.new("RGB",(200,200),(21,27,46)); d=ImageDraw.Draw(av)
+            d.ellipse((4,4,196,196), fill=(33,41,72))
+            d.text((80,86), "AVA", fill=(220,230,255))
+            buf=io.BytesIO(); av.save(buf,format="PNG")
+            ava_src = f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
+
+        st.markdown(f"""
+        <div class="chatDock">
+          <div class="avaWrap">
+            <img src="{ava_src}" />
+            <div class="onlineDot"></div>
+          </div>
+          <div class="avaName">{st.session_state.get("avatar_name","아바타 코치")}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with colR:
+        for role, text in ss.msgs:
+            cls = "user" if role=="user" else ""
+            st.markdown(f'<div class="msgbox"><div class="msg {cls}"><div class="balloon">{text}</div></div></div>', unsafe_allow_html=True)
+
     st.markdown('</div>', unsafe_allow_html=True)
 
     # 스냅샷
@@ -469,9 +501,8 @@ elif tab=="pay":
                 c["month_accum"] = min(c["cap"], c["month_accum"] + best[1])
         ss.msgs.append(("bot", f"{merchant} {money(amount)} 결제 완료! 적용 {applied} · 절약 {money(best[1])}"))
         ss.audit.append({"ts": time.time(), "type":"payment", "merchant":merchant, "amount":int(amount), "applied":applied, "saving":best[1]})
-        # 게이미피케이션: 예산 준수/절약 배지
         if amount <= 10000: ss.badges.add("소액절약")
-        st.success("결제가 완료되었습니다!")
+        st.success("결제가 완료되었습니다! (모의)")
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -494,18 +525,6 @@ elif tab=="goal":
 
     st.progress(min(g["progress"],100)/100, text=f"진행률 {g['progress']}%")
     st.write(f"권장 월 납입: **{money(CUSTOMER['goal']['monthly'])}**")
-
-    # what-if
-    st.markdown('<div class="label" style="margin-top:6px;">What-if 시뮬레이션</div>', unsafe_allow_html=True)
-    cur = CUSTOMER["goal"]["monthly"]
-    new_monthly = st.slider("월 납입(가정)", min_value=50_000, max_value=1_000_000, value=int(cur), step=50_000)
-    remain = max(0, CUSTOMER["goal"]["target"] - int(CUSTOMER["accounts"][2]["balance"]))
-    months_needed = math.ceil(remain / max(new_monthly,1))
-    st.info(f"월 {money(new_monthly)} 납입 시 예상 달성 기간: 약 **{months_needed}개월**")
-    if new_monthly >= cur * 1.2: ss.badges.add("저축가속")
-
-    rows=[{"월":i+1,"권장 납입":CUSTOMER["goal"]["monthly"],"누적":CUSTOMER["goal"]["monthly"]*(i+1)} for i in range(CUSTOMER["goal"]["months"])]
-    st.dataframe(pd.DataFrame(rows), height=220, use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
 else:  # calendar
