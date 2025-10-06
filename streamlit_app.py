@@ -127,7 +127,8 @@ if API_KEY:
     try:
         import google.generativeai as genai
         genai.configure(api_key=API_KEY)
-        MODEL = genai.GenerativeModel("gemini-1.5-flash-latest")
+MODEL = genai.GenerativeModel("gemini-1.5-flash")
+
         USE_LLM = True
     except Exception as e:
         st.sidebar.error(f"Gemini 초기화 실패: {e}")
