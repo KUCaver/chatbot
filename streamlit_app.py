@@ -127,7 +127,7 @@ if API_KEY:
     try:
         import google.generativeai as genai
         genai.configure(api_key=API_KEY)
-MODEL = genai.GenerativeModel("gemini-1.5-flash")
+        MODEL = genai.GenerativeModel("gemini-1.5-flash")
 
         USE_LLM = True
     except Exception as e:
