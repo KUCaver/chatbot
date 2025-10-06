@@ -122,14 +122,30 @@ hero_b64 = upload_to_b64(hero_up)
 avatar_b64 = upload_to_b64(avatar_up)
 
 # ------------------ LLM ------------------
+# ------------------ LLM ------------------
 USE_LLM, MODEL = False, None
 if API_KEY:
     try:
         import google.generativeai as genai
         genai.configure(api_key=API_KEY)
-        MODEL = genai.GenerativeModel("gemini-1.5-flash")
 
-        USE_LLM = True
+        # 우선순위: 2.5 Flash → 2.5 Flash-Lite → 2.0 Flash → 2.5 Flash Preview
+        for _model in (
+            "gemini-2.5-flash",                 # 일반 추천
+            "gemini-2.5-flash-lite",            # 더 저렴/고효율
+            "gemini-2.0-flash",                 # 구세대 2.0 대안
+            "gemini-2.5-flash-preview-09-2025"  # 가용 시 프리뷰
+        ):
+            try:
+                MODEL = genai.GenerativeModel(_model)
+                USE_LLM = True
+                break
+            except Exception:
+                continue
+
+        if not USE_LLM:
+            raise RuntimeError("사용 가능한 Gemini 모델을 찾지 못했습니다. 모델/리전을 확인하세요.")
+
     except Exception as e:
         st.sidebar.error(f"Gemini 초기화 실패: {e}")
 
